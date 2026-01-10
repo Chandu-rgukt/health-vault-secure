@@ -1,0 +1,183 @@
+-- Create profiles table for user management
+CREATE TABLE public.profiles (
+  id UUID NOT NULL DEFAULT gen_random_uuid() PRIMARY KEY,
+  user_id UUID NOT NULL UNIQUE REFERENCES auth.users(id) ON DELETE CASCADE,
+  full_name TEXT NOT NULL,
+  email TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'owner' CHECK (role IN ('owner', 'viewer')),
+  avatar_url TEXT,
+  created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+  updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+);
+
+-- Create health reports table
+CREATE TABLE public.health_reports (
+  id UUID NOT NULL DEFAULT gen_random_uuid() PRIMARY KEY,
+  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  report_type TEXT NOT NULL,
+  report_date DATE NOT NULL,
+  file_path TEXT NOT NULL,
+  file_name TEXT NOT NULL,
+  file_size INTEGER,
+  notes TEXT,
+  created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+  updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+);
+
+-- Create vitals table for tracking health metrics
+CREATE TABLE public.vitals (
+  id UUID NOT NULL DEFAULT gen_random_uuid() PRIMARY KEY,
+  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  vital_type TEXT NOT NULL,
+  value DECIMAL NOT NULL,
+  unit TEXT NOT NULL,
+  recorded_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+  notes TEXT,
+  created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+);
+
+-- Create shared reports table for access control
+CREATE TABLE public.shared_reports (
+  id UUID NOT NULL DEFAULT gen_random_uuid() PRIMARY KEY,
+  report_id UUID NOT NULL REFERENCES public.health_reports(id) ON DELETE CASCADE,
+  owner_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  shared_with_email TEXT NOT NULL,
+  shared_with_user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+  access_type TEXT NOT NULL DEFAULT 'read' CHECK (access_type IN ('read')),
+  created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+  expires_at TIMESTAMP WITH TIME ZONE
+);
+
+-- Enable Row Level Security
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.health_reports ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.vitals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.shared_reports ENABLE ROW LEVEL SECURITY;
+
+-- Profiles policies
+CREATE POLICY "Users can view their own profile" 
+ON public.profiles FOR SELECT 
+USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can update their own profile" 
+ON public.profiles FOR UPDATE 
+USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can insert their own profile" 
+ON public.profiles FOR INSERT 
+WITH CHECK (auth.uid() = user_id);
+
+-- Health reports policies
+CREATE POLICY "Users can view their own reports" 
+ON public.health_reports FOR SELECT 
+USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can view shared reports" 
+ON public.health_reports FOR SELECT 
+USING (
+  EXISTS (
+    SELECT 1 FROM public.shared_reports sr 
+    WHERE sr.report_id = health_reports.id 
+    AND sr.shared_with_user_id = auth.uid()
+  )
+);
+
+CREATE POLICY "Users can insert their own reports" 
+ON public.health_reports FOR INSERT 
+WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "Users can update their own reports" 
+ON public.health_reports FOR UPDATE 
+USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can delete their own reports" 
+ON public.health_reports FOR DELETE 
+USING (auth.uid() = user_id);
+
+-- Vitals policies
+CREATE POLICY "Users can view their own vitals" 
+ON public.vitals FOR SELECT 
+USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can insert their own vitals" 
+ON public.vitals FOR INSERT 
+WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "Users can update their own vitals" 
+ON public.vitals FOR UPDATE 
+USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can delete their own vitals" 
+ON public.vitals FOR DELETE 
+USING (auth.uid() = user_id);
+
+-- Shared reports policies
+CREATE POLICY "Owners can view their shared reports" 
+ON public.shared_reports FOR SELECT 
+USING (auth.uid() = owner_id);
+
+CREATE POLICY "Recipients can view reports shared with them" 
+ON public.shared_reports FOR SELECT 
+USING (auth.uid() = shared_with_user_id);
+
+CREATE POLICY "Owners can share their reports" 
+ON public.shared_reports FOR INSERT 
+WITH CHECK (auth.uid() = owner_id);
+
+CREATE POLICY "Owners can revoke shared access" 
+ON public.shared_reports FOR DELETE 
+USING (auth.uid() = owner_id);
+
+-- Create function to auto-create profile on signup
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS TRIGGER AS $$
+BEGIN
+  INSERT INTO public.profiles (user_id, full_name, email)
+  VALUES (
+    NEW.id,
+    COALESCE(NEW.raw_user_meta_data->>'full_name', split_part(NEW.email, '@', 1)),
+    NEW.email
+  );
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+-- Create trigger for auto profile creation
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+
+-- Create function to update timestamps
+CREATE OR REPLACE FUNCTION public.update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SET search_path = public;
+
+-- Create triggers for automatic timestamp updates
+CREATE TRIGGER update_profiles_updated_at
+  BEFORE UPDATE ON public.profiles
+  FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+
+CREATE TRIGGER update_health_reports_updated_at
+  BEFORE UPDATE ON public.health_reports
+  FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+
+-- Create storage bucket for health reports
+INSERT INTO storage.buckets (id, name, public) VALUES ('health-reports', 'health-reports', false);
+
+-- Storage policies for health reports
+CREATE POLICY "Users can upload their own reports"
+ON storage.objects FOR INSERT
+WITH CHECK (bucket_id = 'health-reports' AND auth.uid()::text = (storage.foldername(name))[1]);
+
+CREATE POLICY "Users can view their own reports"
+ON storage.objects FOR SELECT
+USING (bucket_id = 'health-reports' AND auth.uid()::text = (storage.foldername(name))[1]);
+
+CREATE POLICY "Users can delete their own reports"
+ON storage.objects FOR DELETE
+USING (bucket_id = 'health-reports' AND auth.uid()::text = (storage.foldername(name))[1]);
