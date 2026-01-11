@@ -216,7 +216,7 @@ const Reports = () => {
                             <Button
                               variant="ghost"
                               size="icon"
-                              onClick={() => downloadReport(report.file_path, report.file_name)}
+                              onClick={() => downloadReport(report.id, report.file_name)}
                             >
                               <Download className="w-4 h-4" />
                             </Button>
