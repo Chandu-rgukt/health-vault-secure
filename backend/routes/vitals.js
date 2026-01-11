@@ -41,6 +41,12 @@ router.get('/', authenticateToken, (req, res) => {
 // Create vital
 router.post('/', authenticateToken, (req, res) => {
   try {
+    // Role-based authorization: viewers cannot record vitals
+    const profile = db.prepare('SELECT role FROM profiles WHERE user_id = ?').get(req.user.id);
+    if (profile && profile.role === 'viewer') {
+      return res.status(403).json({ error: 'Viewers cannot record vitals' });
+    }
+
     const { vital_type, value, unit, recorded_at, notes } = req.body;
 
     if (!vital_type || value === undefined || !unit) {
